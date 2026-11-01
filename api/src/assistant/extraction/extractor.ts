@@ -1,0 +1,207 @@
+import { Inject, Injectable } from '@nestjs/common';
+import { generateText, NoObjectGeneratedError, Output } from 'ai';
+import { AssistantModelFactory, ASSISTANT_MODEL_FACTORY } from '../model';
+import { BudgetQualifier, Evidence, FollowUpTiming, RequirementsState, Sourced } from '../types';
+import { amountMatchesEvidence, quoteExists } from './normalize';
+import { Extraction, ExtractionSchema } from './extraction.schema';
+import {
+  AGENT_INSTRUCTION_SOURCE_ID,
+  buildExtractionRepairPrompt,
+  buildExtractionSystemPrompt,
+  buildExtractionUserPrompt,
+  ConversationMessage,
+} from './prompts';
+
+export class ExtractionFailedError extends Error {}
+
+export interface RejectedField {
+  field: string;
+  reason: string;
+}
+
+export interface ExtractionResult {
+  update: Partial<RequirementsState>;
+  intent: Extraction['intent'];
+  closed: boolean;
+  followUp: FollowUpTiming | null;
+  propertyRefs: string[];
+  rejected: RejectedField[];
+}
+
+type ExtractionField<T> = { value: T | null; evidence: Evidence; status: 'stated' | 'missing' | 'ambiguous' };
+
+/**
+ * Which bounds each budget wording actually asserts. "around 2M" is a ceiling and says nothing
+ * about a floor; "from 2M" is the reverse; "between 1.5M and 2M" and "exactly 2M" assert both.
+ */
+const IMPLIES_FLOOR = new Set<BudgetQualifier>(['from', 'between', 'exact']);
+const IMPLIES_CEILING = new Set<BudgetQualifier>(['around', 'under', 'up_to', 'between', 'exact']);
+
+function sourced<T>(value: T, evidence: Evidence): Sourced<T> {
+  return { value, source: evidence.sourceId, evidence };
+}
+
+@Injectable()
+export class Extractor {
+  constructor(@Inject(ASSISTANT_MODEL_FACTORY) private readonly modelFactory: AssistantModelFactory) {}
+
+  async extract(input: {
+    agencyName: string;
+    areas: string[];
+    conversation: ConversationMessage[];
+    analysedMessageId: string;
+    /** The agent's own chat turn, when this is a chat run. */
+    agentInstruction?: string;
+    /** The parent run's requirements, shown so a chat turn only states what changed. */
+    currentRequirements?: unknown;
+    abortSignal?: AbortSignal;
+  }): Promise<ExtractionResult> {
+    const system = buildExtractionSystemPrompt();
+    const prompt = buildExtractionUserPrompt(input);
+    const raw = await this.generate(system, prompt, input.abortSignal);
+    return this.validate(raw, input);
+  }
+
+  private async generate(system: string, prompt: string, abortSignal?: AbortSignal): Promise<Extraction> {
+    try {
+      const result = await generateText({ model: this.modelFactory(), system, prompt, output: Output.object({ schema: ExtractionSchema }), abortSignal });
+      return result.output;
+    } catch (error) {
+      if (!NoObjectGeneratedError.isInstance(error)) throw error;
+      const cause = String(error.cause ?? error.message);
+      try {
+        const result = await generateText({
+          model: this.modelFactory(),
+          system,
+          prompt: buildExtractionRepairPrompt(prompt, cause),
+          output: Output.object({ schema: ExtractionSchema }),
+          abortSignal,
+        });
+        return result.output;
+      } catch (retryError) {
+        throw new ExtractionFailedError(`Extraction failed after a retry: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
+      }
+    }
+  }
+
+  private validate(
+    raw: Extraction,
+    input: { conversation: ConversationMessage[]; areas: string[]; agentInstruction?: string },
+  ): ExtractionResult {
+    const rejected: RejectedField[] = [];
+    const sourceById = new Map(input.conversation.map((m) => [m.id, m.body]));
+    // The agent's own chat turn is a legal evidence source too (architecture section 3.3), under a
+    // synthetic id since it has no Message row. Quotes from it are verified the same way.
+    if (input.agentInstruction !== undefined) {
+      sourceById.set(AGENT_INSTRUCTION_SOURCE_ID, input.agentInstruction);
+    }
+    const areaByLower = new Map(input.areas.map((a) => [a.toLowerCase(), a]));
+
+    const hasValidEvidence = (field: ExtractionField<unknown>): boolean => {
+      if (field.status !== 'stated') return false;
+      const source = sourceById.get(field.evidence.sourceId);
+      if (source === undefined) return false;
+      return quoteExists(field.evidence.quote, source);
+    };
+
+    const update: Partial<RequirementsState> = {};
+
+    if (hasValidEvidence(raw.locations) && raw.locations.value) {
+      const canonical: string[] = [];
+      for (const loc of raw.locations.value) {
+        const match = areaByLower.get(loc.toLowerCase());
+        if (match) canonical.push(match);
+        else rejected.push({ field: 'locations', reason: `"${loc}" is not one of this agency's areas` });
+      }
+      if (canonical.length > 0) update.locations = sourced(canonical, raw.locations.evidence);
+    } else if (raw.locations.status === 'stated') {
+      rejected.push({ field: 'locations', reason: 'evidence quote not found in the cited message' });
+    }
+
+    if (hasValidEvidence(raw.bedrooms) && raw.bedrooms.value) {
+      const { min, max } = raw.bedrooms.value;
+      if (min <= max) update.bedrooms = sourced({ min, max }, raw.bedrooms.evidence);
+      else rejected.push({ field: 'bedrooms', reason: `min (${min}) is greater than max (${max})` });
+    } else if (raw.bedrooms.status === 'stated') {
+      rejected.push({ field: 'bedrooms', reason: 'evidence quote not found in the cited message' });
+    }
+
+    if (hasValidEvidence(raw.budget) && raw.budget.value) {
+      const { minAed, maxAed, qualifier } = raw.budget.value;
+      const quote = raw.budget.evidence.quote;
+      // Each end has to be supported by the wording, not just by a number appearing somewhere in
+      // it. Amount-matching alone cannot tell a floor from a ceiling: "around 2M AED" contains
+      // 2,000,000, so a fabricated `minAed: 2000000` matches the quote just as well as the real
+      // max does. That is not harmless -- `filterRecommendations` rejects anything below the
+      // minimum, so a phantom floor silently drops cheaper listings that genuinely fit.
+      //
+      // The qualifier is the evidence for which bound was meant, so it decides which ends can
+      // survive; the amount check then confirms the figure itself.
+      const keptMin = minAed !== null && IMPLIES_FLOOR.has(qualifier) && amountMatchesEvidence(minAed, quote) ? minAed : null;
+      const keptMax = maxAed !== null && IMPLIES_CEILING.has(qualifier) && amountMatchesEvidence(maxAed, quote) ? maxAed : null;
+
+      if (minAed !== null && keptMin === null) {
+        rejected.push({ field: 'budget.minAed', reason: `a "${qualifier}" budget does not support a minimum of ${minAed}` });
+      }
+      if (maxAed !== null && keptMax === null) {
+        rejected.push({ field: 'budget.maxAed', reason: `a "${qualifier}" budget does not support a maximum of ${maxAed}` });
+      }
+
+      // A budget with neither end left says nothing, so it is not merged at all.
+      if (keptMin !== null || keptMax !== null) {
+        update.budget = sourced({ minAed: keptMin, maxAed: keptMax, qualifier }, raw.budget.evidence);
+      }
+    } else if (raw.budget.status === 'stated') {
+      rejected.push({ field: 'budget', reason: 'evidence quote not found in the cited message' });
+    }
+
+    if (hasValidEvidence(raw.propertyType) && raw.propertyType.value) {
+      update.propertyType = sourced(raw.propertyType.value, raw.propertyType.evidence);
+    } else if (raw.propertyType.status === 'stated') {
+      rejected.push({ field: 'propertyType', reason: 'evidence quote not found in the cited message' });
+    }
+
+    if (hasValidEvidence(raw.transaction) && raw.transaction.value) {
+      update.transaction = sourced(raw.transaction.value, raw.transaction.evidence);
+    } else if (raw.transaction.status === 'stated') {
+      rejected.push({ field: 'transaction', reason: 'evidence quote not found in the cited message' });
+    }
+
+    const preferences: Sourced<string>[] = [];
+    for (const pref of raw.preferences) {
+      const source = sourceById.get(pref.evidence.sourceId);
+      if (source === undefined || !quoteExists(pref.evidence.quote, source)) {
+        rejected.push({ field: 'preferences', reason: `evidence for "${pref.text}" not found in the cited message` });
+        continue;
+      }
+      preferences.push(sourced(pref.text, pref.evidence));
+    }
+    if (preferences.length > 0) update.preferences = preferences;
+
+    let followUp: FollowUpTiming | null = null;
+    if (hasValidEvidence(raw.followUp) && raw.followUp.value) {
+      const { kind, weekday, days, time } = raw.followUp.value;
+      // `source` is kept so the caller can anchor the date correctly: a phrase quoted from a lead's
+      // message is relative to that message, one from the agent's own turn is relative to now.
+      followUp = { kind, weekday, days, time, raw: raw.followUp.evidence.quote, source: raw.followUp.evidence.sourceId };
+    } else if (raw.followUp.status === 'stated') {
+      rejected.push({ field: 'followUp', reason: 'evidence quote not found in the cited message' });
+    }
+
+    // `closed` is evidence-gated like every other decision input. Closing a lead sends the run to
+    // the `closed` route, which proposes NO follow-up and reports "no longer interested" -- so
+    // letting untrusted text set it would be a message changing what the assistant does, which
+    // TASK.md forbids. The lead has to have actually said it.
+    let closed = false;
+    if (raw.closed) {
+      const source = sourceById.get(raw.closedEvidence.sourceId);
+      if (source !== undefined && quoteExists(raw.closedEvidence.quote, source)) {
+        closed = true;
+      } else {
+        rejected.push({ field: 'closed', reason: 'evidence quote not found in the cited message' });
+      }
+    }
+
+    return { update, intent: raw.intent, closed, followUp, propertyRefs: raw.propertyRefs, rejected };
+  }
+}

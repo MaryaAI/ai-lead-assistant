@@ -1,0 +1,157 @@
+{
+  "trace": [
+    {
+      "tool": "search_properties",
+      "input": {
+        "areas": [
+          "Dubai Marina"
+        ],
+        "type": "villa",
+        "bedroomsMin": 5,
+        "bedroomsMax": 5,
+        "priceMaxAed": 900000,
+        "status": "available",
+        "sortBy": "price",
+        "limit": 10
+      },
+      "output": {
+        "items": [],
+        "total": 0
+      },
+      "durationMs": 2
+    }
+  ],
+  "runs": [
+    {
+      "label": "createRun(0bab04e6-d42d-521e-aa18-d256456a6b69)",
+      "payload": {
+        "id": "172b38d4-6b3b-483f-bbbf-eb5f7332c000",
+        "leadId": "0bab04e6-d42d-521e-aa18-d256456a6b69",
+        "messageId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+        "status": "completed",
+        "requirements": {
+          "locations": [
+            "Dubai Marina"
+          ],
+          "bedrooms": 5,
+          "budgetAed": {
+            "min": null,
+            "max": 900000
+          },
+          "propertyType": "villa",
+          "intent": "buy",
+          "preferences": []
+        },
+        "recommendations": [],
+        "summary": "No available 5-bedroom villas in Dubai Marina at or under AED 900,000 in this agency's listings. The search returned 0 matches.",
+        "proposedActions": [
+          {
+            "id": "d4285de0-ddff-4064-938f-9f1c4df1ad83",
+            "type": "create_follow_up_task",
+            "status": "pending_approval",
+            "task": {
+              "title": "Discuss budget/criteria options with lead – no Dubai Marina 5BR villa under AED 900k",
+              "notes": "Search found no available 5-bed villas in Dubai Marina under AED 900,000. Ask the lead whether they would raise the budget, widen the area, or change the bedroom count or property type. Then re-run the search.",
+              "dueAt": null
+            },
+            "needsClarification": "The lead did not say when to follow up."
+          }
+        ],
+        "trace": [
+          {
+            "tool": "search_properties",
+            "input": {
+              "areas": [
+                "Dubai Marina"
+              ],
+              "type": "villa",
+              "bedroomsMin": 5,
+              "bedroomsMax": 5,
+              "priceMaxAed": 900000,
+              "status": "available",
+              "sortBy": "price",
+              "limit": 10
+            },
+            "output": {
+              "items": [],
+              "total": 0
+            },
+            "durationMs": 2
+          }
+        ],
+        "createdAt": "2026-10-31T04:04:10.995Z",
+        "parentRunId": null,
+        "trigger": "analysis",
+        "agentMessage": null,
+        "reply": "I couldn't find any available 5-bedroom villas in Dubai Marina priced at or under AED 900,000, so I have no listings to recommend. Options to discuss with the lead: raise the budget, look at nearby areas, or consider a smaller villa or an apartment or townhouse in Dubai Marina.",
+        "extraction": {
+          "bedroomsRange": {
+            "min": 5,
+            "max": 5
+          },
+          "rejected": [],
+          "propertyRefs": [],
+          "state": {
+            "locations": {
+              "value": [
+                "Dubai Marina"
+              ],
+              "source": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+              "evidence": {
+                "sourceId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+                "quote": "Dubai Marina"
+              }
+            },
+            "bedrooms": {
+              "value": {
+                "min": 5,
+                "max": 5
+              },
+              "source": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+              "evidence": {
+                "sourceId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+                "quote": "5-bedroom"
+              }
+            },
+            "budget": {
+              "value": {
+                "minAed": null,
+                "maxAed": 900000,
+                "qualifier": "under"
+              },
+              "source": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+              "evidence": {
+                "sourceId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+                "quote": "under 900k AED"
+              }
+            },
+            "propertyType": {
+              "value": "villa",
+              "source": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+              "evidence": {
+                "sourceId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+                "quote": "villa"
+              }
+            },
+            "transaction": {
+              "value": "buy",
+              "source": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+              "evidence": {
+                "sourceId": "6fd52efc-4a8a-5dc8-b6d5-fa1f85a045db",
+                "quote": "Ready to buy this week"
+              }
+            },
+            "preferences": []
+          }
+        },
+        "steps": [
+          {
+            "step": "route",
+            "route": "search",
+            "trigger": "analysis"
+          }
+        ]
+      }
+    }
+  ]
+}
